@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from admm_noc.utils import discretize_dynamics
 from jax import lax, debug
 from admm_noc.utils import wrap_angle, rollout
-from admm_noc.admm_optimal_control import admm
+from admm_noc.par_admm_optimal_control import par_admm
 
 
 # Enable 64 bit floating point precision
@@ -56,7 +56,7 @@ def pendulum(state: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
         (
             velocity,
             -gravity / length * jnp.sin(position)
-            + (action - damping * velocity) / (mass * length**2),
+            + (action - damping * velocity) / (mass * length ** 2),
         )
     )
 
@@ -76,7 +76,7 @@ x = rollout(dynamics, u, x0)
 z = jnp.zeros((horizon, u.shape[1] + x.shape[1]))
 l = jnp.zeros((horizon, u.shape[1] + x.shape[1]))
 sigma = 10.0
-opt_x, opt_u, _, _ = admm(
+opt_x, opt_u, _, _ = par_admm(
     transient_cost, final_cost, dynamics, projection, x, u, z, l, sigma
 )
 

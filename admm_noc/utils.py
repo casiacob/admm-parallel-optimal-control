@@ -21,7 +21,7 @@ def runge_kutta(
     return state + step / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 
 
-def discretize_dynamics(ode: Callable, simulation_step: float, downsampling: int):
+def discretize_dynamics(ode: Callable, simulation_step: float, downsampling):
     def dynamics(
         state: jnp.ndarray,
         action: jnp.ndarray,

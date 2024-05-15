@@ -63,25 +63,32 @@ def pendulum(state: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
         )
     )
 
-
-simulation_step = 0.05
-downsampling = 1
-dynamics = discretize_dynamics(
-    ode=pendulum, simulation_step=simulation_step, downsampling=downsampling
-)
-
-horizon = 15
-sigma = jnp.array([0.1])
 key = jax.random.PRNGKey(1)
-u_init = sigma * jax.random.normal(key, shape=(horizon, 1))
+
+def mpc_experiment_seq(disc_step, sim_steps, x0_init, u_init, z_init, l_init, sigma):
+    return end - start
+
+
+disc_step_range = [0.05, 0.025, 0.01, 0.005]
+horizon_range = [15, 30, 75, 150]
+sim_step_range = [80, 160, 400, 800]
+seq_times = []
+par_times = []
+
+horizon = horizon_range[3]
+disc_step = disc_step_range[3]
+sim_steps = sim_step_range[3]
+u_init = 0.1 * jax.random.normal(key, shape=(horizon, 1))
 x0_init = jnp.array([wrap_angle(0.1), -0.1])
-x_init = rollout(dynamics, u_init, x0_init)
-z_init = jnp.zeros((horizon, u_init.shape[1] + x_init.shape[1]))
-l_init = jnp.zeros((horizon, u_init.shape[1] + x_init.shape[1]))
+z_init = jnp.zeros((horizon, u_init.shape[1] + x0_init.shape[0]))
+l_init = jnp.zeros((horizon, u_init.shape[1] + x0_init.shape[0]))
 sigma = 1.0
 
-
-def mpc_loop(carry, input):
+downsampling = 1
+dynamics = discretize_dynamics(
+    ode=pendulum, simulation_step=disc_step, downsampling=downsampling
+)
+def mpc_loop_seq(carry, input):
     x0, u, z, l = carry
     x = rollout(dynamics, u, x0)
     x, u, z, l = seq_admm(
@@ -90,20 +97,32 @@ def mpc_loop(carry, input):
     return (x[1], u, z, l), (x[1], u[0])
 
 
-jitted_mpc_loop = jax.jit(mpc_loop)
 _, (mpc_x, mpc_u) = jax.lax.scan(
-    jitted_mpc_loop, (x0_init, u_init, z_init, l_init), xs=None, length=80
+    mpc_loop_seq, (x0_init, u_init, z_init, l_init), xs=None, length=sim_steps
 )
 start = time.time()
 _, (mpc_x, mpc_u) = jax.lax.scan(
-    jitted_mpc_loop, (x0_init, u_init, z_init, l_init), xs=None, length=80
+    mpc_loop_seq, (x0_init, u_init, z_init, l_init), xs=None, length=sim_steps
 )
-jax.block_until_ready(mpc_u)
+jax.block_until_ready(mpc_x)
 end = time.time()
-print(end - start)
+print('seq time ', end-start)
 
-plt.plot(mpc_x[:, 0])
-plt.plot(mpc_x[:, 1])
-# # plt.show()
-plt.plot(mpc_u)
-plt.show()
+def mpc_loop_par(carry, input):
+    x0, u, z, l = carry
+    x = rollout(dynamics, u, x0)
+    x, u, z, l = par_admm(
+        transient_cost, final_cost, dynamics, projection, x, u, z, l, sigma
+    )
+    return (x[1], u, z, l), (x[1], u[0])
+
+_, (mpc_x, mpc_u) = jax.lax.scan(
+    mpc_loop_par, (x0_init, u_init, z_init, l_init), xs=None, length=sim_steps
+)
+start = time.time()
+_, (mpc_x, mpc_u) = jax.lax.scan(
+    mpc_loop_par, (x0_init, u_init, z_init, l_init), xs=None, length=sim_steps
+)
+jax.block_until_ready(mpc_x)
+end = time.time()
+print('par time ', end-start)

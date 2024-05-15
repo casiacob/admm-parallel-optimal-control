@@ -1,4 +1,9 @@
 setup.py
+admm_noc/costates.py
+admm_noc/optimal_control_problem.py
+admm_noc/par_admm_optimal_control.py
+admm_noc/seq_admm_optimal_control.py
+admm_noc/utils.py
 admm_noc.egg-info/PKG-INFO
 admm_noc.egg-info/SOURCES.txt
 admm_noc.egg-info/dependency_links.txt

@@ -2,11 +2,9 @@ import jax.numpy as jnp
 from jax import grad, hessian, jacrev
 from jax import vmap, debug
 from jax import lax
-from admm_noc.optimal_control_problem import ADMM_OCP, Derivatives
-from paroc.lqt_problem import LQT
-from paroc import par_bwd_pass, par_fwd_pass
+from admm_noc.optimal_control_problem import ADMM_OCP, Derivatives, LinearizedOCP
 from typing import Callable
-from admm_noc.costates import par_costates, seq_costates
+from admm_noc.costates import seq_costates
 
 
 def compute_derivatives(
@@ -33,6 +31,7 @@ def compute_derivatives(
     )
     return Derivatives(cx, cu, cxx, cuu, cxu, fx, fu, fxx, fuu, fxu)
 
+
 def compute_lqr_params(lagrange_multipliers: jnp.ndarray, d: Derivatives):
     def body(l, cu, cxx, cuu, cxu, fu, fxx, fuu, fxu):
         r = cu + fu.T @ l
@@ -46,38 +45,59 @@ def compute_lqr_params(lagrange_multipliers: jnp.ndarray, d: Derivatives):
     )
 
 
-def noc_to_lqt(
-    ru: jnp.ndarray,
-    Q: jnp.ndarray,
-    R: jnp.ndarray,
-    M: jnp.ndarray,
-    A: jnp.ndarray,
-    B: jnp.ndarray,
+
+def bwd_pass(
+    final_cost: Callable, xN: jnp.ndarray, lqr: LinearizedOCP, d: Derivatives, rp: float
 ):
-    T = Q.shape[0]
-    nx = Q.shape[1]
-    nu = R.shape[1]
+    def bwd_step(carry, inp):
+        Vxx, Vx = carry
+        r, Q, R, M, fx, fu = inp
 
-    def offsets(Xt, Ut, Mt, rut):
-        XiM = jnp.linalg.solve(Xt, Mt)
-        st = -jnp.linalg.solve(Ut - Mt.T @ XiM, rut)
-        rt = -XiM @ st
-        return rt, st
+        Qxx = Q + fx.T @ Vxx @ fx
+        Quu = R + fu.T @ Vxx @ fu
+        Quu = Quu + rp * jnp.eye(Quu.shape[0])
+        eigv, _ = jnp.linalg.eigh(Quu)
+        convex = jnp.all(eigv > 0)
+        Qxu = M + fx.T @ Vxx @ fu
+        Qu = r + fu.T @ Vx
+        Qx = fx.T @ Vx
 
-    r, s = vmap(offsets)(Q, R, M, ru)
-    H = jnp.eye(nx)
-    HT = H
-    H = jnp.kron(jnp.ones((T, 1, 1)), H)
-    Z = jnp.eye(nu)
-    Z = jnp.kron(jnp.ones((T, 1, 1)), Z)
-    XT = Q[0]
-    rT = jnp.zeros(nx)
-    c = jnp.zeros((T, nx))
-    lqt = LQT(A, B, c, XT, HT, rT, Q, H, r, R, Z, s, M)
-    return lqt
+        k = -jnp.linalg.inv(Quu) @ Qu
+        K = -jnp.linalg.inv(Quu) @ Qxu.T
+
+        Vx = Qx - Qu @ jnp.linalg.inv(Quu) @ Qxu.T
+        Vxx = Qxx - Qxu @ jnp.linalg.inv(Quu) @ Qxu.T
+        dV = k.T @ Qu + 0.5 * k.T @ Quu @ k
+        return (Vxx, Vx), (K, k, dV, convex)
+
+    VxxN = hessian(final_cost)(xN)
+    VxN = jnp.zeros(xN.shape[0])
+
+    _, (gain, ff_gain, diff_cost, pos_def) = lax.scan(
+        bwd_step,
+        (VxxN, VxN),
+        (lqr.r, lqr.Q, lqr.R, lqr.M, d.fx, d.fu),
+        reverse=True,
+    )
+    return gain, ff_gain, jnp.sum(diff_cost), jnp.all(pos_def)
 
 
-def par_solution(
+def fwd_pass(gain: jnp.ndarray, ff_gain: jnp.ndarray, d: Derivatives):
+    dx0 = jnp.zeros(gain.shape[2])
+
+    def fwd_step(carry, inp):
+        prev_dx = carry
+        K, k, fx, fu = inp
+        next_dx = (fx + fu @ K) @ prev_dx + fu @ k
+        return next_dx, next_dx
+
+    _, dx = lax.scan(fwd_step, dx0, (gain, ff_gain, d.fx, d.fu))
+    dx = jnp.vstack((dx0, dx))
+    du = vmap(lambda K, k, x: K @ x + k)(gain, ff_gain, dx[:-1])
+    return du, dx
+
+
+def seq_solution(
     ocp: ADMM_OCP,
     x: jnp.ndarray,
     u: jnp.ndarray,
@@ -86,14 +106,12 @@ def par_solution(
     rp: float,
 ):
     d = compute_derivatives(ocp, x, u, z, lamda)
-    # l = seq_costates(ocp, x[-1], d)
-    l = par_costates(ocp, x[-1], d)
+    l = seq_costates(ocp, x[-1], d)
     ru, Q, R, M = compute_lqr_params(l, d)
-    R = R + jnp.kron(jnp.ones((R.shape[0], 1, 1)), rp * jnp.eye(R.shape[1]))
-    lqt = noc_to_lqt(ru, Q, R, M, d.fx, d.fu)
-    Kx_par, d_par, S_par, v_par, pred_reduction, convex_problem = par_bwd_pass(lqt)
-    du_par, dx_par = par_fwd_pass(lqt, jnp.zeros(x[0].shape[0]), Kx_par, d_par)
-    return dx_par, du_par, pred_reduction, convex_problem, ru
+    lqr = LinearizedOCP(ru, Q, R, M)
+    K, k, dV, bp_feasible = bwd_pass(ocp.final_cost, x[-1], lqr, d, rp)
+    du, dx = fwd_pass(K, k, d)
+    return dx, du, dV, bp_feasible, ru
 
 
 def argmin_xu(
@@ -112,7 +130,7 @@ def argmin_xu(
 
         cost = ocp.total_cost(x, u, z, l)
         # debug.print("cost:         {x}", x=cost)
-        dx, du, predicted_reduction, bp_feasible, Hu = par_solution(ocp, x, u, z, l, mu)
+        dx, du, predicted_reduction, bp_feasible, Hu = seq_solution(ocp, x, u, z, l, mu)
         Hu_norm = jnp.max(jnp.abs(Hu))
 
         temp_u = u + du
@@ -150,17 +168,7 @@ def argmin_xu(
         # exit_cond = jnp.logical_or(exit_cond, t > 3045)
         return jnp.logical_not(exit_cond)
 
-    (
-        opt_x,
-        opt_u,
-        _,
-        _,
-        _,
-        _,
-        _,
-        _,
-        _,
-    ) = lax.while_loop(
+    (opt_x, opt_u, _, _, _, _, _, _, _,) = lax.while_loop(
         while_cond,
         while_body,
         (states, controls, consensus, dual, 0, mu0, nu0, jnp.array(1.0), jnp.bool(1.0)),
@@ -192,13 +200,14 @@ def primal_residual(states: jnp.ndarray, controls: jnp.ndarray, dual: jnp.ndarra
     return jnp.max(jnp.abs(jnp.hstack((states[:-1], controls)) - dual))
 
 
-def admm(
+def seq_admm(
     stage_cost: Callable,
     final_cost: Callable,
     dynamics: Callable,
     projection: Callable,
     states0: jnp.ndarray,
     controls0: jnp.ndarray,
+
     consensus0: jnp.ndarray,
     dual0: jnp.ndarray,
     penalty_param: float,
@@ -245,16 +254,22 @@ def admm(
 
     def admm_conv(val):
         _, _, _, _, rp_infty, rd_infty, _ = val
-        exit_condition = jnp.logical_and(rp_infty < 1e-4, rd_infty < 1e-4)
+        exit_condition = jnp.logical_and(rp_infty < 1e-2, rd_infty < 1e-2)
         return jnp.logical_not(exit_condition)
 
-    opt_states, opt_controls, opt_consensus, opt_dual, _, _, iterations = (
-        lax.while_loop(
-            admm_conv,
-            admm_iteration,
-            (states0, controls0, consensus0, dual0, jnp.inf, jnp.inf, 0.0),
-        )
+    (
+        opt_states,
+        opt_controls,
+        opt_consensus,
+        opt_dual,
+        _,
+        _,
+        iterations,
+    ) = lax.while_loop(
+        admm_conv,
+        admm_iteration,
+        (states0, controls0, consensus0, dual0, jnp.inf, jnp.inf, 0.0),
     )
-    debug.print("iterations      {x}", x=iterations)
-    debug.print("------------------------------")
+    # debug.print("iterations      {x}", x=iterations)
+    # debug.print("------------------------------")
     return opt_states, opt_controls, opt_consensus, opt_dual
