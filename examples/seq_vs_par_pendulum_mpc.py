@@ -82,7 +82,7 @@ u_init = 0.1 * jax.random.normal(key, shape=(horizon, 1))
 x0_init = jnp.array([wrap_angle(0.1), -0.1])
 z_init = jnp.zeros((horizon, u_init.shape[1] + x0_init.shape[0]))
 l_init = jnp.zeros((horizon, u_init.shape[1] + x0_init.shape[0]))
-sigma = 1.0
+sigma = 0.1
 
 downsampling = 1
 dynamics = discretize_dynamics(
