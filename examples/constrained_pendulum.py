@@ -67,7 +67,7 @@ dynamics = discretize_dynamics(
     ode=pendulum, simulation_step=simulation_step, downsampling=downsampling
 )
 
-horizon = 60
+horizon = 80
 sigma = jnp.array([0.1])
 key = jax.random.PRNGKey(1)
 u = sigma * jax.random.normal(key, shape=(horizon, 1))
@@ -75,7 +75,7 @@ x0 = jnp.array([wrap_angle(0.1), -0.1])
 x = rollout(dynamics, u, x0)
 z = jnp.zeros((horizon, u.shape[1] + x.shape[1]))
 l = jnp.zeros((horizon, u.shape[1] + x.shape[1]))
-sigma = 10.0
+sigma = 6.0
 opt_x, opt_u, _, _ = par_admm(
     transient_cost, final_cost, dynamics, projection, x, u, z, l, sigma
 )

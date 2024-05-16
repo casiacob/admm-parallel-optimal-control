@@ -253,4 +253,5 @@ def par_admm(
     )
     # debug.print("iterations      {x}", x=iterations)
     # debug.print("------------------------------")
+    # debug.breakpoint()
     return opt_states, opt_controls, opt_consensus, opt_dual
