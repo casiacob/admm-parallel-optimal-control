@@ -8,16 +8,16 @@ from admm_noc.utils import wrap_angle, rollout
 from admm_noc.par_admm_optimal_control import par_admm
 from admm_noc.seq_admm_optimal_control import seq_admm
 
-_jitted_par_admm = jax.jit(par_admm)
-_jitted_seq_admm = jax.jit(seq_admm)
-
 # Enable 64 bit floating point precision
 config.update("jax_enable_x64", True)
 
-config.update("jax_platform_name", "cpu")
+config.update("jax_platform_name", "cuda")
 
 import time
 
+
+# _jitted_par_admm = jax.jit(par_admm)
+# _jitted_seq_admm = jax.jit(seq_admm)
 
 def projection(z):
     control_ub = jnp.array([jnp.inf, jnp.inf, 5.0])
@@ -67,86 +67,76 @@ def pendulum(state: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
 
 key = jax.random.PRNGKey(1)
 
-disc_step_range = [0.04, 0.02, 0.01, 0.005, 0.0025, 0.0016, 0.00125, 0.001]
-frequencies = [25, 50, 100, 200, 400, 600, 800, 1000]
-horizon_range = [20, 40, 70, 140, 280, 500, 600, 700]
-sim_step_range = [100, 200, 400, 800, 1600, 2500, 3200, 4000]
-sigma_range = [0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.2]
+Ts = [0.04, 0.02, 0.01, 0.005, 0.0025, 0.0016, 0.00125, 0.001]
+f = [25, 50, 100, 200, 400, 600, 800, 1000]
+H = [20, 40, 70, 140, 280, 500, 600, 700]
+N = [100, 200, 400, 800, 1600, 2500, 3200, 4000]
+sigma = [0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.2]
 
-seq_times = []
-par_times = []
+downsampling = 1
 
-def mpc_experiment_seq(Ts, H, N, penalty_param):
-    u_init = 0.1 * jax.random.normal(key, shape=(H, 1))
-    x0_init = jnp.array([wrap_angle(0.1), -0.1])
-    z_init = jnp.zeros((H, u_init.shape[1] + x0_init.shape[0]))
-    l_init = jnp.zeros((H, u_init.shape[1] + x0_init.shape[0]))
+#################################### experiment 0 ######################################################################
+horizon = H[0]
+sim_steps = N[0]
+disc_step = Ts[0]
+penalty = sigma[0]
 
-    downsampling = 1
-    dynamics = discretize_dynamics(
-        ode=pendulum, simulation_step=Ts, downsampling=downsampling
+dynamics = discretize_dynamics(
+    ode=pendulum, simulation_step=disc_step, downsampling=downsampling
+)
+u_init = 0.1 * jax.random.normal(key, shape=(horizon, 1))
+x0_init = jnp.array([wrap_angle(0.1), -0.1])
+x_init = rollout(dynamics, u_init, x0_init)
+z_init = jnp.zeros((horizon, u_init.shape[1] + x_init.shape[1]))
+l_init = jnp.zeros((horizon, u_init.shape[1] + x_init.shape[1]))
+def mpc_loop_seq(carry, input):
+    x0, u, z, l = carry
+    x = rollout(dynamics, u, x0)
+    x, u, z, l = seq_admm(
+        transient_cost, final_cost, dynamics, projection, x, u, z, l, penalty
     )
+    return (x[1], u, z, l), (x[1], u[0])
 
-    def mpc_loop_seq(carry, input):
-        x0, u, z, l = carry
-        x = rollout(dynamics, u, x0)
-        x, u, z, l = _jitted_seq_admm(
-            transient_cost, final_cost, dynamics, projection, x, u, z, l, penalty_param
-        )
-        return (x[1], u, z, l), (x[1], u[0])
-
-    start = time.time()
-    _, (mpc_x, mpc_u) = jax.lax.scan(
-        mpc_loop_seq, (x0_init, u_init, z_init, l_init), xs=None, length=N
+def mpc_loop_par(carry, input):
+    x0, u, z, l = carry
+    x = rollout(dynamics, u, x0)
+    x, u, z, l = par_admm(
+        transient_cost, final_cost, dynamics, projection, x, u, z, l, penalty
     )
-    jax.block_until_ready(mpc_x)
-    end = time.time()
-
-    return start - end
-
-def mpc_experiment_par(Ts, H, N, penalty_param):
-    u_init = 0.1 * jax.random.normal(key, shape=(H, 1))
-    x0_init = jnp.array([wrap_angle(0.1), -0.1])
-    z_init = jnp.zeros((H, u_init.shape[1] + x0_init.shape[0]))
-    l_init = jnp.zeros((H, u_init.shape[1] + x0_init.shape[0]))
-
-    downsampling = 1
-    dynamics = discretize_dynamics(
-        ode=pendulum, simulation_step=Ts, downsampling=downsampling
-    )
-
-    def mpc_loop_seq(carry, input):
-        x0, u, z, l = carry
-        x = rollout(dynamics, u, x0)
-        x, u, z, l = _jitted_par_admm(
-            transient_cost, final_cost, dynamics, projection, x, u, z, l, penalty_param
-        )
-        return (x[1], u, z, l), (x[1], u[0])
-
-    start = time.time()
-    _, (mpc_x, mpc_u) = jax.lax.scan(
-        mpc_loop_seq, (x0_init, u_init, z_init, l_init), xs=None, length=N
-    )
-    jax.block_until_ready(mpc_x)
-    end = time.time()
-
-    return end - start
+    return (x[1], u, z, l), (x[1], u[0])
 
 
-mpc_experiment_seq(disc_step_range[0], horizon_range[0], sim_step_range[0], sigma_range[0])
-mpc_experiment_par(disc_step_range[0], horizon_range[0], sim_step_range[0], sigma_range[0])
+_jitted_mpc_loop_seq = jax.jit(mpc_loop_seq)
+_jitted_mpc_loop_par = jax.jit(mpc_loop_par)
 
-for i in range(2):
-    s_time = mpc_experiment_seq(disc_step_range[i], horizon_range[i], sim_step_range[i], sigma_range[i])
-    p_time = mpc_experiment_par(disc_step_range[i], horizon_range[i], sim_step_range[i], sigma_range[i])
-    seq_times.append(s_time)
-    par_times.append(p_time)
+_, (mpc_x, mpc_u) = jax.lax.scan(
+    _jitted_mpc_loop_seq, (x0_init, u_init, z_init, l_init), xs=None, length=sim_steps
+)
 
+start = time.time()
+_, (mpc_x, mpc_u) = jax.lax.scan(
+    _jitted_mpc_loop_seq, (x0_init, u_init, z_init, l_init), xs=None, length=sim_steps
+)
+jax.block_until_ready(mpc_x)
+end = time.time()
 
-plt.plot(jnp.array(frequencies[:2]), jnp.array(seq_times), marker='s', label='seq')
-plt.plot(jnp.array(frequencies[:2]), jnp.array(par_times), marker='.', label='par')
-plt.grid(which='both')
-plt.legend()
-plt.yscale('log')
-plt.xscale('log')
-plt.show()
+seq_time = end-start
+
+_, (mpc_x, mpc_u) = jax.lax.scan(
+    _jitted_mpc_loop_par, (x0_init, u_init, z_init, l_init), xs=None, length=sim_steps
+)
+
+start = time.time()
+_, (mpc_x, mpc_u) = jax.lax.scan(
+    _jitted_mpc_loop_par, (x0_init, u_init, z_init, l_init), xs=None, length=sim_steps
+)
+jax.block_until_ready(mpc_x)
+end = time.time()
+
+par_time = end-start
+print('Sampling period: ', Ts, 'Horizon: ', horizon, 'Simulation time steps: ', sim_steps)
+print('Sequential time: ', seq_time)
+print('Parallel time  : ', par_time)
+
+#######################################################################################################################
+
