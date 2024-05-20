@@ -71,15 +71,15 @@ Ts = [0.04, 0.02, 0.01, 0.005, 0.0025, 0.0016, 0.00125, 0.001]
 f = [25, 50, 100, 200, 400, 600, 800, 1000]
 H = [20, 40, 70, 140, 280, 500, 600, 700]
 N = [100, 200, 400, 800, 1600, 2500, 3200, 4000]
-sigma = [0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.2]
+sigma = [0.1, 0.5, 0.5, 0.5, 0.7, 0.5, 0.5, 0.5, 0.5]
 
 downsampling = 1
 
 #################################### experiment 0 ######################################################################
-horizon = H[0]
-sim_steps = N[0]
-disc_step = Ts[0]
-penalty = sigma[0]
+horizon = H[4]
+sim_steps = N[4]
+disc_step = Ts[4]
+penalty = sigma[4]
 
 dynamics = discretize_dynamics(
     ode=pendulum, simulation_step=disc_step, downsampling=downsampling
@@ -114,10 +114,10 @@ _, (mpc_x, mpc_u) = jax.lax.scan(
 )
 
 start = time.time()
-_, (mpc_x, mpc_u) = jax.lax.scan(
+_, (mpc_x_seq, mpc_u_seq) = jax.lax.scan(
     _jitted_mpc_loop_seq, (x0_init, u_init, z_init, l_init), xs=None, length=sim_steps
 )
-jax.block_until_ready(mpc_x)
+jax.block_until_ready(mpc_x_seq)
 end = time.time()
 
 seq_time = end-start
@@ -127,16 +127,27 @@ _, (mpc_x, mpc_u) = jax.lax.scan(
 )
 
 start = time.time()
-_, (mpc_x, mpc_u) = jax.lax.scan(
+_, (mpc_x_par, mpc_u_par) = jax.lax.scan(
     _jitted_mpc_loop_par, (x0_init, u_init, z_init, l_init), xs=None, length=sim_steps
 )
-jax.block_until_ready(mpc_x)
+jax.block_until_ready(mpc_x_par)
 end = time.time()
 
 par_time = end-start
-print('Sampling period: ', Ts, 'Horizon: ', horizon, 'Simulation time steps: ', sim_steps)
+
+print('Sampling period: ', disc_step, ', Horizon: ', horizon, ', Horizon time: ', disc_step * horizon, ', Simulation time: ', disc_step * sim_steps, ', Simulation time steps: ', sim_steps)
 print('Sequential time: ', seq_time)
 print('Parallel time  : ', par_time)
-
+print('par vs seq solution')
+print('u: ', jnp.max(jnp.abs(mpc_u_par - mpc_u_seq)))
+print('x_1: ', jnp.max(jnp.abs(mpc_x_par[:, 0] - mpc_x_seq[:, 0])))
+print('x_2: ', jnp.max(jnp.abs(mpc_x_par[:, 1] - mpc_x_seq[:, 1])))
 #######################################################################################################################
 
+plt.plot(mpc_x_seq[:, 0], label='angle seq')
+plt.plot(mpc_x_par[:, 0], label='angle par')
+# # plt.show()
+plt.plot(mpc_u_seq, label='control seq')
+plt.plot(mpc_u_par, label='control par')
+plt.legend()
+plt.show()

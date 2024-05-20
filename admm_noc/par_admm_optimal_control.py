@@ -103,7 +103,7 @@ def argmin_xu(
     consensus: jnp.ndarray,
     dual: jnp.ndarray,
 ):
-    mu0 = 1.0
+    mu0 = 0.
     nu0 = 2.0
 
     def while_body(val):
@@ -234,9 +234,10 @@ def par_admm(
         return x, u, z, l, rp_infty, rd_infty, it_cnt
 
     def admm_conv(val):
-        _, _, _, _, rp_infty, rd_infty, _ = val
+        _, _, _, _, rp_infty, rd_infty, it_cnt = val
         exit_condition = jnp.logical_and(rp_infty < 1e-2, rd_infty < 1e-2)
-        return jnp.logical_not(exit_condition)
+        # return jnp.logical_not(exit_condition)
+        return it_cnt < 50
 
     (
         opt_states,
