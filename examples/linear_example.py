@@ -2,24 +2,25 @@ import jax.numpy as jnp
 import jax.random
 from jax import config
 import matplotlib.pyplot as plt
-from admm_noc.utils import discretize_dynamics, get_QP_problem
+from admm_noc.utils import discretize_dynamics, condense_OCP_to_QP
 from jax import lax, debug
 from admm_noc.utils import wrap_angle, rollout
-from admm_noc.par_admm_optimal_control import par_admm
+from admm_noc.par_admm_lin_opt_con import par_admm_lin
 import time
 from jax import jacrev
+from admm_noc.optimal_control_problem import ADMM_LIN_OCP
 from jaxopt import BoxOSQP
 
 
 # Enable 64 bit floating point precision
 config.update("jax_enable_x64", True)
 
-config.update("jax_platform_name", "cuda")
+config.update("jax_platform_name", "cpu")
 
 
 def projection(z):
-    control_ub = jnp.array([jnp.inf, jnp.inf, 2.5])
-    control_lb = jnp.array([-jnp.inf, -jnp.inf, -2.5])
+    control_ub = jnp.array([2.5])
+    control_lb = jnp.array([-2.5])
     return jnp.clip(z, control_lb, control_ub)
 
 def ode(state: jnp.ndarray, control: jnp.ndarray):
@@ -28,82 +29,45 @@ def ode(state: jnp.ndarray, control: jnp.ndarray):
     return Ac @ state + Bc @ control
 
 
-
-def transient_cost(state: jnp.ndarray, control: jnp.ndarray):
-    X = jnp.diag(jnp.array([1e2, 1e0]))
-    U = 1e-1 * jnp.eye(control.shape[0])
-    return 0.5 * state.T @ X @ state + 0.5 * control.T @ U @ control
-
-
-def final_cost(state: jnp.ndarray):
-    P = jnp.diag(jnp.array([1e2, 1e0]))
-    return 0.5 * state.T @ P @ state
-
-
-def total_cost(states: jnp.ndarray, controls: jnp.ndarray):
-    ct = jax.vmap(transient_cost)(states[:-1], controls)
-    cT = final_cost(states[-1])
-    return cT + jnp.sum(ct)
-
-
-step = 0.1
-horizon = 60
-downsampling = 1
-dynamics = discretize_dynamics(ode, step, downsampling)
-x0 = jnp.array([2.0, 1.0])
-u = jnp.zeros((horizon, 1))
-x = rollout(dynamics, u, x0)
-z = jnp.zeros((horizon, u.shape[1] + x.shape[1]))
-l = jnp.zeros((horizon, u.shape[1] + x.shape[1]))
-sigma = 0.1
-
-anon_par_admm = lambda x, u, z, l, sigma: par_admm(transient_cost, final_cost, dynamics, projection, x, u, z, l, sigma)
-_jitted_par_admm = jax.jit(anon_par_admm)
-
-opt_x, opt_u, _, _ = _jitted_par_admm(
-     x, u, z, l, sigma
-)
-start = time.time()
-opt_x, opt_u, _, _ = _jitted_par_admm(
-     x, u, z, l, sigma
-)
-jax.block_until_ready(opt_x)
-end = time.time()
-par_time = end-start
-
-####################################################################################################################
-# define batch problem
-N = horizon
-QN = jnp.diag(jnp.array([1e2, 1e0]))
 Q = jnp.diag(jnp.array([1e2, 1e0]))
 R = 1e-1 * jnp.eye(1)
+P = jnp.diag(jnp.array([1e2, 1e0]))
+
+Ts = 0.1
+N = 60
+downsampling = 1
+dynamics = discretize_dynamics(ode, Ts, downsampling)
+
+
 x0 = jnp.array([2.0, 1.0])
-Ad = jacrev(dynamics, 0)(jnp.array([0., 0.]), jnp.array([0.]))
-Bd = jacrev(dynamics, 1)(jnp.array([0., 0.]), jnp.array([0.]))
-umin = -2.5
-umax = 2.5
+u = jnp.zeros((N, 1))
+x = rollout(dynamics, u, x0)
+z = jnp.zeros((N, u.shape[1]))
+l = jnp.zeros((N, u.shape[1]))
 
-H, g, A, upper = get_QP_problem(Ad, Bd, QN, Q, R, N, jnp.eye(1), umax, umin)
-lower = -jnp.inf * jnp.ones(upper.shape[0])
-qp = BoxOSQP(jit=True, maxiter=50, rho_start=0.1, rho_max=0.1, rho_min=0.1,  sigma=1e-32, stepsize_updates_frequency=1)
-sol = qp.run(params_obj=(H, g@x0), params_eq=A, params_ineq=(lower, upper))
+Ad = jacrev(dynamics, 0)(x[0], u[0])
+Bd = jacrev(dynamics, 1)(x[0], u[0])
 
-start = time.time()
-batch_sol = qp.run(params_obj=(H, g@x0), params_eq=A, params_ineq=(lower, upper))
-jax.block_until_ready(batch_sol.params.primal[0])
-end = time.time()
-batch_time = end-start
-u_batch = batch_sol.params.primal[0].reshape(-1, 1)
-x_batch = rollout(dynamics, u_batch, x0)
-
-par_cost = total_cost(opt_x, opt_u)
-batch_cost = total_cost(x_batch, u_batch)
+# define and solve via OSQP
+H, g, C_u, u_lim = condense_OCP_to_QP(Ad, Bd, P, Q, R, N, jnp.eye(1), jnp.array([2.5]), jnp.array([-2.5]))
+l_lim = -jnp.inf*jnp.ones(u_lim.shape)
+qp = BoxOSQP(momentum=1., rho_start=0.1, rho_min=0.1, rho_max=0.1, stepsize_updates_frequency=1e32, eq_qp_solve='cg')
+sol = qp.run(params_obj=(H, g@x0), params_eq=C_u, params_ineq=(l_lim, u_lim)).params.primal[0]
 
 
+# define and solve via admm
+Q = jnp.kron(jnp.ones((N, 1, 1)), Q)
+R = jnp.kron(jnp.ones((N, 1, 1)), R)
+Ad = jnp.kron(jnp.ones((N, 1, 1)), Ad)
+Bd = jnp.kron(jnp.ones((N, 1, 1)), Bd)
+
+penalty_parameter = 0.1
+
+admm_ocp = ADMM_LIN_OCP(Ad, Bd, P, Q, R, projection, penalty_parameter)
 
 
-print('par time           : ', par_time)
-print('batch time         : ', batch_time)
-print('|u_par  - u_batch| : ', jnp.max(jnp.abs(opt_u-u_batch)))
-print('batch cost', batch_cost)
-print('par cost', par_cost)
+opt_x, opt_u, _, _ = par_admm_lin(admm_ocp, x, u, z, l)
+
+plt.plot(opt_u)
+plt.plot(sol)
+plt.show()
