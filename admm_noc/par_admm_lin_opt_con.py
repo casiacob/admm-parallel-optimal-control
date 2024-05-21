@@ -75,11 +75,12 @@ def par_admm_lin(
     controls0: jnp.ndarray,
     consensus0: jnp.ndarray,
     dual0: jnp.ndarray,
+    max_it: int
 ):
 
     def admm_iteration(val):
         x, u, z, l, _, _, it_cnt = val
-        debug.print('iteration     {x}', x=it_cnt)
+        # debug.print('iteration     {x}', x=it_cnt)
         next_x, next_u = argmin_xu(ocp, x, z, l)
 
         prev_z = z
@@ -90,17 +91,17 @@ def par_admm_lin(
         rp_infty = primal_residual(u, z)
         rd_infty = jnp.max(jnp.abs(z - prev_z))
         it_cnt += 1
-        debug.print('|rp|_inf      {x}', x=rp_infty)
-        debug.print('|rd|_inf      {x}', x=rd_infty)
-        debug.print('------------------------------')
+        # debug.print('|rp|_inf      {x}', x=rp_infty)
+        # debug.print('|rd|_inf      {x}', x=rd_infty)
+        # debug.print('------------------------------')
         # debug.breakpoint()
         return next_x, next_u, z, l, rp_infty, rd_infty, it_cnt
 
     def admm_conv(val):
         _, _, _, _, rp_infty, rd_infty, it_cnt = val
         exit_condition = jnp.logical_and(rp_infty < 1e-2, rd_infty < 1e-2)
-        return jnp.logical_not(exit_condition)
-        # return it_cnt < 50
+        # return jnp.logical_not(exit_condition)
+        return it_cnt < max_it
 
     (
         opt_states,
