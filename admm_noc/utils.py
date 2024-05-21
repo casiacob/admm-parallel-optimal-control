@@ -57,7 +57,7 @@ def rollout(dynamics, controls, initial_state):
 
 
 
-def get_QP_problem(A, B, P, Q, R, N, C_u, uub, ulb):
+def condense_OCP_to_QP(A, B, P, Q, R, N, C_u, uub, ulb):
     m = A.shape[0]
     H = Q
     G = R

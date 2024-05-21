@@ -1,7 +1,6 @@
 from typing import NamedTuple, Callable
 import jax.numpy as jnp
 
-
 class ADMM_OCP(NamedTuple):
     dynamics: Callable
     projection: Callable
@@ -29,3 +28,14 @@ class LinearizedOCP(NamedTuple):
     Q: jnp.ndarray
     R: jnp.ndarray
     M: jnp.ndarray
+
+
+class ADMM_LIN_OCP(NamedTuple):
+    Ad: jnp.array             # transition matrices
+    Bd: jnp.ndarray           # control matrices
+    P: jnp.ndarray            # final cost state penalty
+    Q: jnp.ndarray            # stage cost state penalty
+    R: jnp.ndarray            # stage cost control penaty
+    projection: Callable      # projection function
+    penalty_parameter: float  # admm penalty parameter
+
