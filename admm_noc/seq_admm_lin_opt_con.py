@@ -3,7 +3,7 @@ from jax import vmap, debug
 from jax import lax
 from admm_noc.optimal_control_problem import ADMM_LIN_OCP
 from paroc.lqt_problem import LQT
-from paroc import par_bwd_pass, par_fwd_pass
+from paroc import seq_bwd_pass, seq_fwd_pass
 
 
 def create_lqt(
@@ -42,8 +42,8 @@ def argmin_xu(
     dual: jnp.ndarray,
 ):
     lqt = create_lqt(ocp, consensus, dual)
-    Kx_par, d_par, S_par, v_par, _, _ = par_bwd_pass(lqt)
-    controls, states = par_fwd_pass(lqt, states[0], Kx_par, d_par)
+    Kx_par, d_par, S_par, v_par = seq_bwd_pass(lqt)
+    controls, states = seq_fwd_pass(lqt, states[0], Kx_par, d_par)
     return states, controls
 
 
@@ -69,7 +69,7 @@ def primal_residual(controls: jnp.ndarray, consensus: jnp.ndarray):
     return jnp.max(jnp.abs(controls - consensus))
 
 
-def par_admm_lin(
+def seq_admm_lin(
     ocp: ADMM_LIN_OCP,
     states0: jnp.ndarray,
     controls0: jnp.ndarray,
@@ -99,7 +99,7 @@ def par_admm_lin(
 
     def admm_conv(val):
         _, _, _, _, rp_infty, rd_infty, it_cnt = val
-        exit_condition = jnp.logical_and(rp_infty < 1e-2, rd_infty < 1e-2)
+        exit_condition = jnp.logical_and(rp_infty < 1e-3, rd_infty < 1e-3)
         exit_condition = jnp.logical_or(exit_condition, it_cnt > max_it)
         return jnp.logical_not(exit_condition)
         # return it_cnt < max_it
