@@ -99,10 +99,10 @@ def seq_admm_lin(
 
     def admm_conv(val):
         _, _, _, _, rp_infty, rd_infty, it_cnt = val
-        exit_condition = jnp.logical_and(rp_infty < 1e-3, rd_infty < 1e-3)
-        exit_condition = jnp.logical_or(exit_condition, it_cnt > max_it)
-        return jnp.logical_not(exit_condition)
-        # return it_cnt < max_it
+        # exit_condition = jnp.logical_and(rp_infty < 1e-3, rd_infty < 1e-3)
+        # exit_condition = jnp.logical_or(exit_condition, it_cnt > max_it)
+        # return jnp.logical_not(exit_condition)
+        return it_cnt < max_it
 
     (
         opt_states,
