@@ -6,7 +6,7 @@ from admm_noc.utils import discretize_dynamics
 from jax import lax, debug
 from admm_noc.utils import wrap_angle, rollout
 from admm_noc.par_admm_optimal_control import par_admm
-
+from admm_noc.ddp_admm_optimal_control import ddp_admm
 
 # Enable 64 bit floating point precision
 config.update("jax_enable_x64", True)
@@ -61,13 +61,13 @@ def pendulum(state: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
     )
 
 
-simulation_step = 0.05
+simulation_step = 0.01
 downsampling = 1
 dynamics = discretize_dynamics(
     ode=pendulum, simulation_step=simulation_step, downsampling=downsampling
 )
 
-horizon = 80
+horizon = 100
 sigma = jnp.array([0.1])
 key = jax.random.PRNGKey(1)
 u = sigma * jax.random.normal(key, shape=(horizon, 1))
@@ -75,8 +75,8 @@ x0 = jnp.array([wrap_angle(0.1), -0.1])
 x = rollout(dynamics, u, x0)
 z = jnp.zeros((horizon, u.shape[1] + x.shape[1]))
 l = jnp.zeros((horizon, u.shape[1] + x.shape[1]))
-sigma = 6.0
-opt_x, opt_u, _, _ = par_admm(
+sigma = 1.0
+opt_x, opt_u, _, _, _ = par_admm(
     transient_cost, final_cost, dynamics, projection, x, u, z, l, sigma
 )
 

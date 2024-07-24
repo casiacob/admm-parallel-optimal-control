@@ -64,13 +64,13 @@ def pendulum(state: jnp.ndarray, action: jnp.ndarray) -> jnp.ndarray:
     )
 
 
-simulation_step = 0.001
+simulation_step = 0.01
 downsampling = 1
 dynamics = discretize_dynamics(
     ode=pendulum, simulation_step=simulation_step, downsampling=downsampling
 )
 
-horizon = 700
+horizon = 70
 sigma = jnp.array([0.1])
 key = jax.random.PRNGKey(1)
 u_init = sigma * jax.random.normal(key, shape=(horizon, 1))
@@ -84,16 +84,17 @@ sigma = 0.2
 def mpc_loop(carry, input):
     x0, u, z, l = carry
     x = rollout(dynamics, u, x0)
-    x, u, z, l = par_admm(
+    x, u, z, l, iterations = par_admm(
         transient_cost, final_cost, dynamics, projection, x, u, z, l, sigma
     )
-    return (x[1], u, z, l), (x[1], u[0])
+    return (x[1], u, z, l), (x[1], u[0], iterations)
 
 
 jitted_mpc_loop = jax.jit(mpc_loop)
-_, (mpc_x, mpc_u) = jax.lax.scan(
-    jitted_mpc_loop, (x0_init, u_init, z_init, l_init), xs=None, length=4000
+_, (mpc_x, mpc_u, n_iterations) = jax.lax.scan(
+    jitted_mpc_loop, (x0_init, u_init, z_init, l_init), xs=None, length=400
 )
+print(jnp.sum(n_iterations))
 # start = time.time()
 # _, (mpc_x, mpc_u) = jax.lax.scan(
 #     jitted_mpc_loop, (x0_init, u_init, z_init, l_init), xs=None, length=80

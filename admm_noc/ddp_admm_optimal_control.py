@@ -1,12 +1,10 @@
 import jax.numpy as jnp
+import jax.scipy as jcp
 from jax import grad, hessian, jacrev
 from jax import vmap, debug
 from jax import lax
 from admm_noc.optimal_control_problem import ADMM_OCP, Derivatives
-from paroc.lqt_problem import LQT
-from paroc import par_bwd_pass, par_fwd_pass
 from typing import Callable
-from admm_noc.costates import par_costates
 
 
 def compute_derivatives(
@@ -34,64 +32,70 @@ def compute_derivatives(
     return Derivatives(cx, cu, cxx, cuu, cxu, fx, fu, fxx, fuu, fxu)
 
 
-def compute_lqr_params(lagrange_multipliers: jnp.ndarray, d: Derivatives):
-    def body(l, cu, cxx, cuu, cxu, fu, fxx, fuu, fxu):
-        r = cu + fu.T @ l
-        Q = cxx + jnp.tensordot(l, fxx, axes=1)
-        R = cuu + jnp.tensordot(l, fuu, axes=1)
-        M = cxu + jnp.tensordot(l, fxu, axes=1)
-        return r, Q, R, M
-
-    return vmap(body)(
-        lagrange_multipliers[1:], d.cu, d.cxx, d.cuu, d.cxu, d.fu, d.fxx, d.fuu, d.fxu
-    )
-
-
-def noc_to_lqt(
-    ru: jnp.ndarray,
-    Q: jnp.ndarray,
-    R: jnp.ndarray,
-    M: jnp.ndarray,
-    A: jnp.ndarray,
-    B: jnp.ndarray,
-):
-    T = Q.shape[0]
-    nx = Q.shape[1]
-    nu = R.shape[1]
-
-    def offsets(Xt, Ut, Mt, rut):
-        XiM = jnp.linalg.solve(Xt, Mt)
-        st = -jnp.linalg.solve(Ut - Mt.T @ XiM, rut)
-        rt = -XiM @ st
-        return rt, st
-
-    r, s = vmap(offsets)(Q, R, M, ru)
-    H = jnp.eye(nx)
-    HT = H
-    H = jnp.kron(jnp.ones((T, 1, 1)), H)
-    Z = jnp.eye(nu)
-    Z = jnp.kron(jnp.ones((T, 1, 1)), Z)
-    XT = Q[0]
-    rT = jnp.zeros(nx)
-    c = jnp.zeros((T, nx))
-    lqt = LQT(A, B, c, XT, HT, rT, Q, H, r, R, Z, s, M)
-    return lqt
-
-
-def par_solution(
-    nominal_states: jnp.ndarray,
-    derivatives: Derivatives,
+def bwd_pass(
+    final_cost: Callable,
+    final_state: jnp.ndarray,
+    d: Derivatives,
     reg_param: float,
-    ru: jnp.ndarray,
-    Q: jnp.ndarray,
-    R: jnp.ndarray,
-    M: jnp.ndarray,
 ):
-    R = R + jnp.kron(jnp.ones((R.shape[0], 1, 1)), reg_param * jnp.eye(R.shape[1]))
-    lqt = noc_to_lqt(ru, Q, R, M, derivatives.fx, derivatives.fu)
-    Kx_par, d_par, S_par, v_par, pred_reduction, convex_problem = par_bwd_pass(lqt)
-    du_par, dx_par = par_fwd_pass(lqt, jnp.zeros(nominal_states[0].shape[0]), Kx_par, d_par)
-    return dx_par, du_par, pred_reduction, convex_problem, ru
+    grad_cost_norm = jnp.linalg.norm(d.cu)
+    reg_param = reg_param * grad_cost_norm
+
+    def body(carry, inp):
+        Vx, Vxx = carry
+        cx, cu, cxx, cuu, cxu, fx, fu, fxx, fuu, fxu = inp
+
+        Qx = cx + fx.T @ Vx
+        Qu = cu + fu.T @ Vx
+        Qxx = cxx + fx.T @ Vxx @ fx + jnp.tensordot(Vx, fxx, axes=1)
+        Qxu = cxu + fx.T @ Vxx @ fu + jnp.tensordot(Vx, fxu, axes=1)
+        Quu = cuu + fu.T @ Vxx @ fu + jnp.tensordot(Vx, fuu, axes=1)
+        Quu = Quu + reg_param * jnp.eye(Quu.shape[0])
+        eig_vals, _ = jnp.linalg.eigh(Quu)
+        pos_def = jnp.all(eig_vals > 0)
+
+        k = -jcp.linalg.solve(Quu, Qu)
+        K = -jcp.linalg.solve(Quu, Qxu.T)
+
+        dV = -0.5 * Qu @ jcp.linalg.solve(Quu, Qu)
+        Vx = Qx - Qu @ jcp.linalg.solve(Quu, Qxu.T)
+        Vxx = Qxx - Qxu @ jcp.linalg.solve(Quu, Qxu.T)
+        return (Vx, Vxx), (k, K, dV, pos_def, Qu)
+
+    Vx_final = grad(final_cost)(final_state)
+    Vxx_final = hessian(final_cost)(final_state)
+
+    _, (ffgain, gain, cost_diff, feasible_bwd_pass, Hu) = lax.scan(
+        body,
+        (Vx_final, Vxx_final),
+        (d.cx, d.cu, d.cxx, d.cuu, d.cxu, d.fx, d.fu, d.fxx, d.fuu, d.fxu),
+        reverse=True,
+    )
+    pred_reduction = jnp.sum(cost_diff)
+    feasible_bwd_pass = jnp.all(feasible_bwd_pass)
+
+    return ffgain, gain, pred_reduction, feasible_bwd_pass, Hu
+
+
+
+def nonlin_rollout(
+    ocp: ADMM_OCP,
+    gain: jnp.ndarray,
+    ffgain: jnp.ndarray,
+    nominal_states: jnp.ndarray,
+    nominal_controls: jnp.ndarray,
+):
+    def body(x_hat, inp):
+        K, k, x, u = inp
+        u_hat = u + k + K @ (x_hat - x)
+        next_x_hat = ocp.dynamics(x_hat, u_hat)
+        return next_x_hat, (x_hat, u_hat)
+
+    new_final_state, (new_states, new_controls) = lax.scan(
+        body, nominal_states[0], (gain, ffgain, nominal_states[:-1], nominal_controls)
+    )
+    new_states = jnp.vstack((new_states, new_final_state))
+    return new_states, new_controls
 
 
 def argmin_xu(
@@ -106,30 +110,41 @@ def argmin_xu(
 
     def while_body(val):
         x, u, z, l, iteration_counter, reg_param, reg_inc, _ = val
+        # debug.print("Iteration:    {x}", x=it_cnt)
+
         cost = ocp.total_cost(x, u, z, l)
+        # debug.print("cost:         {x}", x=cost)
+
         derivatives = compute_derivatives(ocp, x, u, z, l)
-        costates = par_costates(ocp, x[-1], derivatives)
-        ru, Q, R, M = compute_lqr_params(costates, derivatives)
 
         def while_inner_loop(inner_val):
             _, _, _, _, rp, r_inc, inner_it_counter = inner_val
-            dx, du, predicted_reduction, bwd_pass_feasible, Hu = par_solution(x, derivatives, rp, ru, Q, R, M)
-            temp_u = u + du
-            temp_x = x + dx
+            ffgain, gain, pred_reduction, feasible_bwd_pass, Hu = bwd_pass(
+                ocp.final_cost, x[-1], derivatives, rp
+            )
+            temp_x, temp_u = nonlin_rollout(ocp, gain, ffgain, x, u)
             Hu_norm = jnp.max(jnp.abs(Hu))
             new_cost = ocp.total_cost(temp_x, temp_u, z, l)
             actual_reduction = new_cost - cost
-            gain_ratio = actual_reduction / predicted_reduction
-            succesful_minimzation = jnp.logical_and(gain_ratio > 0.0, bwd_pass_feasible)
+            gain_ratio = actual_reduction / pred_reduction
+            succesful_minimzation = jnp.logical_and(gain_ratio > 0, feasible_bwd_pass)
             rp = jnp.where(
                 succesful_minimzation,
                 rp * jnp.maximum(1.0 / 3.0, 1.0 - (2.0 * gain_ratio - 1.0) ** 3),
-                rp * r_inc,
+                rp * reg_inc,
             )
             r_inc = jnp.where(succesful_minimzation, 2.0, 2 * r_inc)
             rp = jnp.clip(rp, 1e-16, 1e16)
             inner_it_counter += 1
-            return temp_x, temp_u, succesful_minimzation, Hu_norm, rp, r_inc, inner_it_counter
+            return (
+                temp_x,
+                temp_u,
+                succesful_minimzation,
+                Hu_norm,
+                rp,
+                r_inc,
+                inner_it_counter,
+            )
 
         def while_inner_cond(inner_val):
             _, _, succesful_minimzation, _, _, _, inner_it_counter = inner_val
@@ -143,7 +158,7 @@ def argmin_xu(
             while_inner_loop,
             (x, u, jnp.bool_(0.0), 0.0, reg_param, reg_inc, 0),
         )
-        iteration_counter = iteration_counter + 1
+
         return x, u, z, l, iteration_counter, reg_param, reg_inc, Hamiltonian_norm
 
     def while_cond(val):
@@ -156,6 +171,8 @@ def argmin_xu(
         while_body,
         (states, controls, consensus, dual, 0, mu0, nu0, jnp.array(1.0))
     )
+    # debug.print('{x}', x = iterations)
+    # jax.debug.breakpoint()
     return opt_x, opt_u, iterations
 
 
@@ -182,7 +199,7 @@ def primal_residual(states: jnp.ndarray, controls: jnp.ndarray, dual: jnp.ndarra
     return jnp.max(jnp.abs(jnp.hstack((states[:-1], controls)) - dual))
 
 
-def par_admm(
+def ddp_admm(
     stage_cost: Callable,
     final_cost: Callable,
     dynamics: Callable,
@@ -216,6 +233,7 @@ def par_admm(
 
     def admm_iteration(val):
         x, u, z, l, _, _, it_cnt = val
+        # debug.print('iteration     {x}', x=it_cnt)
         x, u, it = argmin_xu(admm_ocp, x, u, z, l)
         it_cnt += it
         prev_z = z
@@ -232,6 +250,7 @@ def par_admm(
         _, _, _, _, rp_infty, rd_infty, _ = val
         exit_condition = jnp.logical_and(rp_infty < 1e-2, rd_infty < 1e-2)
         return jnp.logical_not(exit_condition)
+        # return it_cnt < 50
 
     (
         opt_states,
