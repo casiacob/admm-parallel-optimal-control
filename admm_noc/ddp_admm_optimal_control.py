@@ -38,8 +38,8 @@ def bwd_pass(
     d: Derivatives,
     reg_param: float,
 ):
-    grad_cost_norm = jnp.linalg.norm(d.cu)
-    reg_param = reg_param * grad_cost_norm
+    # grad_cost_norm = jnp.linalg.norm(d.cu)
+    # reg_param = reg_param * grad_cost_norm
 
     def body(carry, inp):
         Vx, Vxx = carry
@@ -158,7 +158,7 @@ def argmin_xu(
             while_inner_loop,
             (x, u, jnp.bool_(0.0), 0.0, reg_param, reg_inc, 0),
         )
-
+        iteration_counter += 1
         return x, u, z, l, iteration_counter, reg_param, reg_inc, Hamiltonian_norm
 
     def while_cond(val):
@@ -265,7 +265,7 @@ def ddp_admm(
         admm_iteration,
         (states0, controls0, consensus0, dual0, jnp.inf, jnp.inf, 0.0),
     )
-    debug.print("iterations      {x}", x=iterations)
-    debug.print("------------------------------")
+    # debug.print("iterations      {x}", x=iterations)
+    # debug.print("------------------------------")
     # debug.breakpoint()
     return opt_states, opt_controls, opt_consensus, opt_dual, iterations

@@ -55,3 +55,8 @@ def rollout(dynamics, controls, initial_state):
     return states
 
 
+def euler(ode: Callable, simulation_step: float):
+    def dynamics(state, control):
+        return state + simulation_step * ode(state, control)
+
+    return dynamics

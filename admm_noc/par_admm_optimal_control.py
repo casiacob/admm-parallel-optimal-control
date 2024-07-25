@@ -246,7 +246,7 @@ def par_admm(
         admm_iteration,
         (states0, controls0, consensus0, dual0, jnp.inf, jnp.inf, 0.0),
     )
-    debug.print("iterations      {x}", x=iterations)
-    debug.print("------------------------------")
+    # debug.print("iterations      {x}", x=iterations)
+    # debug.print("------------------------------")
     # debug.breakpoint()
     return opt_states, opt_controls, opt_consensus, opt_dual, iterations
