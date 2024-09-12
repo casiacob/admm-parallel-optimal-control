@@ -272,4 +272,4 @@ def seq_admm(
     )
     # debug.print("iterations      {x}", x=iterations)
     # debug.print("------------------------------")
-    return opt_states, opt_controls, opt_consensus, opt_dual
+    return opt_states, opt_controls, opt_consensus, opt_dual, iterations
